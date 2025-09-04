@@ -938,8 +938,8 @@ impl eframe::App for CryptoApp {
                         .auto_bounds(egui::Vec2b::new(false, true))
                         .default_x_bounds(view_window_start, view_window_start + window_size)
                         .show_background(false)
-                        .show_axes([false, false]) // X축 숨기고 왼쪽 Y축도 숨김
-                        .y_axis_position(egui_plot::HPlacement::Right); // Y축을 오른쪽으로 이동
+                        .show_axes([false, true]) // X축 숨기고 Y축 표시
+                        .y_axis_position(egui_plot::HPlacement::Right);
                         volume_plot.show(ui, |plot_ui| {
                             let window_end = view_window_start + window_size;
                             let filtered_data: Vec<_> = data
@@ -991,8 +991,8 @@ impl eframe::App for CryptoApp {
                         .allow_scroll(false)
                         .auto_bounds(egui::Vec2b::new(false, true))
                         .default_x_bounds(view_window_start, view_window_start + window_size)
-                        .show_axes([true, false]) // [bottom, left] - left를 false로 설정
-                        .y_axis_position(egui_plot::HPlacement::Right); // Y축을 오른쪽으로 이동
+                        .show_axes([true, true]) // 하단 X축과 Y축 모두 표시
+                        .y_axis_position(egui_plot::HPlacement::Right);
                     
                         macd_plot.show(ui, |plot_ui| {
                             let window_end = view_window_start + window_size;
@@ -1075,8 +1075,9 @@ impl eframe::App for CryptoApp {
                         .auto_bounds(egui::Vec2b::new(false, false))
                         .default_x_bounds(view_window_start, view_window_start + window_size)
                         .default_y_bounds(0.0, 100.0)
-                        .show_axes([true, false]) // [bottom, left] - left를 false로 설정
-                        .y_axis_position(egui_plot::HPlacement::Right); // Y축을 오른쪽으로 이동
+                        .show_axes([true, true]) // 하단 X축과 Y축 모두 표시
+                        .y_axis_position(egui_plot::HPlacement::Right);
+                        
                         rsi_plot.show(ui, |plot_ui| {
                             let window_end = view_window_start + window_size;
                             let filtered_data: Vec<_> = data
