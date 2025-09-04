@@ -1,18 +1,18 @@
 [package]
-name = "Asterism"
+name = "BullNebula"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version="4.5.43", features=["derive"]}
-eframe = "0.32.0"
-egui = "0.32.0"
+clap = { version="4.5.47", features=["derive"]}
+eframe = "0.32.1"
+egui = "0.32.1"
 egui_plot = "0.33.0"
 tracing = "0.1.41"
-tracing-subscriber = "0.3.15"
+tracing-subscriber = "0.3.20"
 serde = { version = "1.0", features = ["derive"] }
 chrono = "0.4.41"
 fastrand = "2.3.0"
-reqwest = { version = "0.12.22", features = ["json"] }
+reqwest = { version = "0.12.23", features = ["json"] }
 tokio = { version = "1.47.1", features = ["full"] }
-serde_json = "1.0"
+serde_json = "1.0.143"

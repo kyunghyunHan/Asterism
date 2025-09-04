@@ -785,13 +785,14 @@ impl eframe::App for CryptoApp {
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
                     let plot = Plot::new("price_chart")
-                        .view_aspect(3.0)
-                        .allow_zoom([false, false])
-                        .allow_drag([true, false])
-                        .allow_scroll(false)
-                        .auto_bounds(egui::Vec2b::new(false, true))
-                        .default_x_bounds(view_window_start, view_window_start + window_size);
-                    
+                    .view_aspect(3.0)
+                    .allow_zoom([false, false])
+                    .allow_drag([true, false])
+                    .allow_scroll(false)
+                    .auto_bounds(egui::Vec2b::new(false, true))
+                    .default_x_bounds(view_window_start, view_window_start + window_size)
+                    .y_axis_position(egui_plot::HPlacement::Right);
+                
                     let plot_response = plot.show(ui, |plot_ui| {
                         if plot_ui.response().dragged() {
                             let drag_delta = plot_ui.pointer_coordinate_drag_delta();
@@ -931,14 +932,14 @@ impl eframe::App for CryptoApp {
                         ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
                         
                         let volume_plot = Plot::new("volume_overlay")
-                            .allow_zoom([false, false])
-                            .allow_drag([true, false])
-                            .allow_scroll(false)
-                            .auto_bounds(egui::Vec2b::new(false, true))
-                            .default_x_bounds(view_window_start, view_window_start + window_size)
-                            .show_background(false)
-                            .show_axes([false, true]); // Only show Y axis
-                        
+                        .allow_zoom([false, false])
+                        .allow_drag([true, false])
+                        .allow_scroll(false)
+                        .auto_bounds(egui::Vec2b::new(false, true))
+                        .default_x_bounds(view_window_start, view_window_start + window_size)
+                        .show_background(false)
+                        .show_axes([false, false]) // X축 숨기고 왼쪽 Y축도 숨김
+                        .y_axis_position(egui_plot::HPlacement::Right); // Y축을 오른쪽으로 이동
                         volume_plot.show(ui, |plot_ui| {
                             let window_end = view_window_start + window_size;
                             let filtered_data: Vec<_> = data
@@ -985,12 +986,14 @@ impl eframe::App for CryptoApp {
                     |ui| {
                         ui.label("📈 MACD");
                         let macd_plot = Plot::new("macd_chart")
-                            .allow_zoom([false, false])
-                            .allow_drag([true, false])
-                            .allow_scroll(false)
-                            .auto_bounds(egui::Vec2b::new(false, true))
-                            .default_x_bounds(view_window_start, view_window_start + window_size);
-                        
+                        .allow_zoom([false, false])
+                        .allow_drag([true, false])
+                        .allow_scroll(false)
+                        .auto_bounds(egui::Vec2b::new(false, true))
+                        .default_x_bounds(view_window_start, view_window_start + window_size)
+                        .show_axes([true, false]) // [bottom, left] - left를 false로 설정
+                        .y_axis_position(egui_plot::HPlacement::Right); // Y축을 오른쪽으로 이동
+                    
                         macd_plot.show(ui, |plot_ui| {
                             let window_end = view_window_start + window_size;
                             let filtered_data: Vec<_> = data
@@ -1066,13 +1069,14 @@ impl eframe::App for CryptoApp {
                     |ui| {
                         ui.label("⚡ RSI");
                         let rsi_plot = Plot::new("rsi_chart")
-                            .allow_zoom([false, false])
-                            .allow_drag([true, false])
-                            .allow_scroll(false)
-                            .auto_bounds(egui::Vec2b::new(false, false))
-                            .default_x_bounds(view_window_start, view_window_start + window_size)
-                            .default_y_bounds(0.0, 100.0);
-                        
+                        .allow_zoom([false, false])
+                        .allow_drag([true, false])
+                        .allow_scroll(false)
+                        .auto_bounds(egui::Vec2b::new(false, false))
+                        .default_x_bounds(view_window_start, view_window_start + window_size)
+                        .default_y_bounds(0.0, 100.0)
+                        .show_axes([true, false]) // [bottom, left] - left를 false로 설정
+                        .y_axis_position(egui_plot::HPlacement::Right); // Y축을 오른쪽으로 이동
                         rsi_plot.show(ui, |plot_ui| {
                             let window_end = view_window_start + window_size;
                             let filtered_data: Vec<_> = data
