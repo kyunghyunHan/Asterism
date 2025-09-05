@@ -6,7 +6,8 @@ use egui_plot::{BoxElem, BoxPlot, BoxSpread, Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-
+use chrono::Utc;
+use chrono::TimeZone;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -21,7 +22,78 @@ fn main() -> eframe::Result {
         Box::new(|_cc| Ok(Box::<CryptoApp>::default())),
     )
 }
+async fn fetch_klines_historical(
+    timeframe: &Timeframe,
+    start_time: i64,  // Unix timestamp in milliseconds
+    limit: u16,
+) -> Result<Vec<CandleData>, Box<dyn std::error::Error>> {
+    let url = format!(
+        "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval={}&startTime={}&limit={}",
+        timeframe.to_api_string(),
+        start_time,
+        limit
+    );
 
+    let client = reqwest::Client::new();
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        return Err(format!("API error: {}", response.status()).into());
+    }
+
+    let text = response.text().await?;
+    let json: serde_json::Value = serde_json::from_str(&text)?;
+
+    let mut candles = Vec::new();
+
+    if let Some(array) = json.as_array() {
+        for item in array {
+            if let Some(kline_array) = item.as_array() {
+                if kline_array.len() >= 11 {
+                    let timestamp = kline_array[0].as_i64().unwrap_or(0) as f64;
+                    let open = kline_array[1]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let high = kline_array[2]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let low = kline_array[3]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let close = kline_array[4]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let volume = kline_array[5]
+                        .as_str()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+
+                    if open > 0.0 && high > 0.0 && low > 0.0 && close > 0.0 {
+                        candles.push(CandleData {
+                            timestamp: timestamp / 1000.0,
+                            open,
+                            high,
+                            low,
+                            close,
+                            volume,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(candles)
+}
 #[derive(Clone, Debug)]
 struct CandleData {
     timestamp: f64,
@@ -119,7 +191,28 @@ impl Timeframe {
         }
     }
 }
-
+fn format_timestamp_to_date(timestamp: f64, timeframe: &Timeframe) -> String {
+    let dt = Utc.timestamp_opt(timestamp as i64, 0).unwrap();
+    
+    match timeframe {
+        Timeframe::M1 | Timeframe::M3 | Timeframe::M5 | Timeframe::M15 | Timeframe::M30 => {
+            // 분 단위: 시:분 표시
+            dt.format("%H:%M").to_string()
+        },
+        Timeframe::H1 | Timeframe::H4 | Timeframe::H12 => {
+            // 시간 단위: 월-일 시:분 표시
+            dt.format("%m-%d %H:%M").to_string()
+        },
+        Timeframe::D1 => {
+            // 일 단위: 년-월-일 표시
+            dt.format("%Y-%m-%d").to_string()
+        },
+        Timeframe::W1 | Timeframe::MN1 => {
+            // 주/월 단위: 년-월 표시
+            dt.format("%Y-%m").to_string()
+        }
+    }
+}
 #[derive(Clone, PartialEq)]
 enum OrderType {
     Buy,
@@ -178,8 +271,65 @@ struct CryptoApp {
     show_volume: bool,
     shared_drag_delta: f64,
     any_chart_dragged: bool,
+
+    is_loading_historical: bool,
+    earliest_timestamp: f64,
+    historical_data_receiver: Option<mpsc::UnboundedReceiver<Vec<CandleData>>>,
 }
 impl CryptoApp {
+    fn check_and_load_historical_data(&mut self) {
+        // 현재 보기 윈도우의 시작점이 로드된 데이터의 시작점에 가까워졌는지 확인
+        let buffer_time = self.window_size * 0.2; // 윈도우 크기의 20%를 버퍼로 사용
+        
+        if self.view_window_start <= (self.earliest_timestamp + buffer_time) 
+            && !self.is_loading_historical 
+            && self.earliest_timestamp > 0.0 {
+            
+            self.is_loading_historical = true;
+            
+            if let Some(rt) = &self.runtime {
+                let (tx, rx) = mpsc::unbounded_channel();
+                self.historical_data_receiver = Some(rx);
+                
+                let candle_data_clone = self.candle_data.clone();
+                let timeframe_clone = self.timeframe.clone();
+                let earliest_time = self.earliest_timestamp;
+                
+                rt.spawn(async move {
+                    // 현재 가장 이른 시간에서 500개 더 과거로 가져오기
+                    let start_time = (earliest_time as i64 - 
+                        (500 * timeframe_clone.get_candle_interval() as i64)) * 1000;
+                    
+                    match fetch_klines_historical(&timeframe_clone, start_time, 500).await {
+                        Ok(mut historical_candles) => {
+                            // 역순으로 정렬하여 가장 오래된 것부터 앞에 추가
+                            historical_candles.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                            
+                            if let Ok(mut data) = candle_data_clone.lock() {
+                                // 기존 데이터 앞에 과거 데이터 추가
+                                for candle in historical_candles.iter().rev() {
+                                    if candle.timestamp < earliest_time {
+                                        data.push_front(candle.clone());
+                                    }
+                                }
+                                
+                                // 메모리 사용량 제한 (최대 20000개)
+                                while data.len() > 20000 {
+                                    data.pop_back();
+                                }
+                            }
+                            
+                            let _ = tx.send(historical_candles);
+                        }
+                        Err(e) => {
+                            eprintln!("Error fetching historical data: {}", e);
+                            let _ = tx.send(Vec::new());
+                        }
+                    }
+                });
+            }
+        }
+    }
     fn handle_chart_drag(&mut self, plot_ui: &egui_plot::PlotUi) {
         if plot_ui.response().dragged() {
             let drag_delta = plot_ui.pointer_coordinate_drag_delta();
@@ -257,6 +407,9 @@ impl Default for CryptoApp {
             show_volume: true,
             shared_drag_delta: 0.0,
             any_chart_dragged: false,
+            is_loading_historical: false,
+            earliest_timestamp: 0.0,
+            historical_data_receiver: None,
         };
 
         // Start fetching data
@@ -538,6 +691,70 @@ fn calculate_rsi(data: &[CandleData]) -> Vec<(f64, f64)> {
 
 impl eframe::App for CryptoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.is_dragging {
+            if let Some(receiver) = &mut self.data_receiver {
+                while let Ok(new_candles) = receiver.try_recv() {
+                    if !new_candles.is_empty() {
+                        self.is_loading = false;
+
+                        if let Some(latest) = new_candles.last() {
+                            self.latest_timestamp = latest.timestamp;
+                            self.trading_panel.current_price = latest.close;
+                            
+                            // earliest_timestamp 초기화 (첫 로드시)
+                            if self.earliest_timestamp == 0.0 {
+                                if let Ok(data) = self.candle_data.lock() {
+                                    if let Some(first) = data.front() {
+                                        self.earliest_timestamp = first.timestamp;
+                                    }
+                                }
+                            }
+
+                            // 기존 뷰 윈도우 로직...
+                            if self.view_window_start == 0.0 {
+                                let right_margin = self.window_size * 0.1;
+                                self.view_window_start =
+                                    self.latest_timestamp - self.window_size + right_margin;
+                                self.is_live_mode = true;
+                            } else if self.is_live_mode {
+                                let right_margin = self.window_size * 0.1;
+                                let buffer = match self.timeframe {
+                                    Timeframe::M1 => 60.0 * 5.0,
+                                    Timeframe::M3 => 60.0 * 15.0,
+                                    Timeframe::M5 => 60.0 * 25.0,
+                                    Timeframe::M15 => 60.0 * 75.0,
+                                    Timeframe::M30 => 60.0 * 150.0,
+                                    Timeframe::H1 => 60.0 * 60.0 * 5.0,
+                                    Timeframe::H4 => 60.0 * 60.0 * 20.0,
+                                    _ => 60.0 * 60.0 * 24.0 * 5.0,
+                                };
+                                self.view_window_start = self.latest_timestamp + buffer
+                                    - self.window_size
+                                    + right_margin;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 과거 데이터 수신 처리
+            if let Some(receiver) = &mut self.historical_data_receiver {
+                while let Ok(historical_candles) = receiver.try_recv() {
+                    if !historical_candles.is_empty() {
+                        // earliest_timestamp 업데이트
+                        if let Some(earliest) = historical_candles.first() {
+                            if earliest.timestamp < self.earliest_timestamp {
+                                self.earliest_timestamp = earliest.timestamp;
+                            }
+                        }
+                    }
+                    self.is_loading_historical = false;
+                }
+            }
+        }
+        
+        // 과거 데이터 필요 여부 확인
+        self.check_and_load_historical_data();
         // Check for new data
         if !self.is_dragging {
             if let Some(receiver) = &mut self.data_receiver {
@@ -951,8 +1168,8 @@ impl eframe::App for CryptoApp {
                     .allow_drag([true, false])
                     .allow_scroll(false)
                     .auto_bounds(egui::Vec2b::new(false, false))
-                    .show_axes([false, true])
-                    .y_axis_width(5)  // 이 줄 추가
+                    .show_axes([false, true])  // X축도 표시하도록 변경
+                    .y_axis_width(5)
                     .default_x_bounds(view_window_start, effective_window_end)
                     .default_y_bounds(price_min, price_max)
                     .y_axis_position(egui_plot::HPlacement::Right);
@@ -1250,6 +1467,9 @@ impl eframe::App for CryptoApp {
                             .default_x_bounds(view_window_start, effective_window_end)
                             .default_y_bounds(0.0, 100.0)
                             .show_axes([true, true])
+                            .x_axis_formatter(|mark, _range| {
+                                format_timestamp_to_date(mark.value, &self.timeframe)
+                            })
                             .y_axis_width(5)  // 이 줄 추가
 
                             .y_axis_position(egui_plot::HPlacement::Right);
