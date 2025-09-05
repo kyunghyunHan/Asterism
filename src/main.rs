@@ -192,14 +192,15 @@ impl CryptoApp {
 
     fn apply_shared_drag(&mut self) {
         if self.any_chart_dragged && self.shared_drag_delta.abs() > 0.1 {
+            let right_margin = self.window_size * 0.1;
             let proposed_start = self.view_window_start - self.shared_drag_delta as f64;
-            let proposed_end = proposed_start + self.window_size;
+            let proposed_end = proposed_start + self.window_size - right_margin;
 
             if proposed_end <= self.latest_timestamp && proposed_start >= 0.0 {
                 self.view_window_start = proposed_start;
                 self.is_live_mode = false;
             } else if proposed_end > self.latest_timestamp {
-                self.view_window_start = self.latest_timestamp - self.window_size;
+                self.view_window_start = self.latest_timestamp - self.window_size + right_margin;
                 self.is_live_mode = true;
             } else if proposed_start < 0.0 {
                 self.view_window_start = 0.0;
@@ -208,6 +209,22 @@ impl CryptoApp {
 
             self.is_dragging = true;
         }
+    }
+    fn calculate_visible_price_range(&self, filtered_data: &[CandleData]) -> (f64, f64) {
+        if filtered_data.is_empty() {
+            return (0.0, 100.0);
+        }
+
+        let mut min_price = f64::INFINITY;
+        let mut max_price = f64::NEG_INFINITY;
+
+        for candle in filtered_data {
+            min_price = min_price.min(candle.low);
+            max_price = max_price.max(candle.high);
+        }
+
+        let padding = (max_price - min_price) * 0.05;
+        (min_price - padding, max_price + padding)
     }
 }
 
@@ -533,9 +550,12 @@ impl eframe::App for CryptoApp {
                             self.trading_panel.current_price = latest.close;
 
                             if self.view_window_start == 0.0 {
-                                self.view_window_start = self.latest_timestamp - self.window_size;
+                                let right_margin = self.window_size * 0.1;
+                                self.view_window_start =
+                                    self.latest_timestamp - self.window_size + right_margin;
                                 self.is_live_mode = true;
                             } else if self.is_live_mode {
+                                let right_margin = self.window_size * 0.1;
                                 let buffer = match self.timeframe {
                                     Timeframe::M1 => 60.0 * 5.0,
                                     Timeframe::M3 => 60.0 * 15.0,
@@ -546,8 +566,9 @@ impl eframe::App for CryptoApp {
                                     Timeframe::H4 => 60.0 * 60.0 * 20.0,
                                     _ => 60.0 * 60.0 * 24.0 * 5.0,
                                 };
-                                self.view_window_start =
-                                    self.latest_timestamp + buffer - self.window_size;
+                                self.view_window_start = self.latest_timestamp + buffer
+                                    - self.window_size
+                                    + right_margin;
                             }
                         }
                     }
@@ -624,6 +645,7 @@ impl eframe::App for CryptoApp {
                 ui.separator();
 
                 if ui.button("Live").clicked() {
+                    let right_margin = self.window_size * 0.1;
                     let buffer = match self.timeframe {
                         Timeframe::M1 => 60.0 * 5.0,
                         Timeframe::M3 => 60.0 * 15.0,
@@ -634,7 +656,8 @@ impl eframe::App for CryptoApp {
                         Timeframe::H4 => 60.0 * 60.0 * 20.0,
                         _ => 60.0 * 60.0 * 24.0 * 5.0,
                     };
-                    self.view_window_start = self.latest_timestamp + buffer - self.window_size;
+                    self.view_window_start =
+                        self.latest_timestamp + buffer - self.window_size + right_margin;
                     self.is_live_mode = true;
                 }
 
@@ -845,6 +868,7 @@ impl eframe::App for CryptoApp {
             });
 
         // Chart area (now takes remaining space)
+        // Chart area (now takes remaining space)
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading(format!(
                 "📊 BTC/USDT ({})",
@@ -858,13 +882,17 @@ impl eframe::App for CryptoApp {
                 return;
             }
 
-            let data = self.candle_data.lock().unwrap();
-            if data.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.colored_label(egui::Color32::RED, "No data available");
-                });
-                return;
-            }
+            // 데이터 복제를 먼저 수행하여 borrowing 문제 해결
+            let chart_data = {
+                let data = self.candle_data.lock().unwrap();
+                if data.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(egui::Color32::RED, "No data available");
+                    });
+                    return;
+                }
+                data.iter().cloned().collect::<Vec<_>>()
+            };
 
             let mut view_window_start = self.view_window_start;
             let window_size = self.window_size;
@@ -872,6 +900,10 @@ impl eframe::App for CryptoApp {
             let chart_type = self.chart_type.clone();
             let candle_width = self.candle_width;
             let candle_interval = self.timeframe.get_candle_interval();
+
+            // 오른쪽 여백 설정 - 전체 윈도우의 10%
+            let right_margin = window_size * 0.1;
+            let effective_window_end = view_window_start + window_size - right_margin;
 
             // 드래그 상태 초기화
             self.shared_drag_delta = 0.0;
@@ -901,16 +933,29 @@ impl eframe::App for CryptoApp {
                 egui::Vec2::new(ui.available_width(), main_chart_height),
                 egui::Layout::top_down(egui::Align::LEFT),
                 |ui| {
-                    let plot = Plot::new("price_chart")
-                        .view_aspect(3.0)
-                        .allow_zoom([false, false])
-                        .allow_drag([true, false])
-                        .allow_scroll(false)
-                        .auto_bounds(egui::Vec2b::new(false, true))
-                        .show_axes([false, true]) // X축 숨김, Y축만 표시
+                    let filtered_data: Vec<_> = chart_data
+                        .iter()
+                        .filter(|candle| {
+                            let margin = window_size * 0.1;
+                            candle.timestamp >= (view_window_start - margin)
+                                && candle.timestamp <= (effective_window_end + margin)
+                        })
+                        .cloned()
+                        .collect();
 
-                        .default_x_bounds(view_window_start, view_window_start + window_size)
-                        .y_axis_position(egui_plot::HPlacement::Right);
+                    let (price_min, price_max) = self.calculate_visible_price_range(&filtered_data);
+
+                    let plot = Plot::new("price_chart")
+                    .view_aspect(3.0)
+                    .allow_zoom([false, false])
+                    .allow_drag([true, false])
+                    .allow_scroll(false)
+                    .auto_bounds(egui::Vec2b::new(false, false))
+                    .show_axes([false, true])
+                    .y_axis_width(5)  // 이 줄 추가
+                    .default_x_bounds(view_window_start, effective_window_end)
+                    .default_y_bounds(price_min, price_max)
+                    .y_axis_position(egui_plot::HPlacement::Right);
 
                     plot.show(ui, |plot_ui| {
                         // 드래그 처리
@@ -921,17 +966,6 @@ impl eframe::App for CryptoApp {
                                 self.any_chart_dragged = true;
                             }
                         }
-
-                        let window_end = view_window_start + window_size;
-                        let filtered_data: Vec<_> = data
-                            .iter()
-                            .filter(|candle| {
-                                let margin = window_size * 0.1;
-                                candle.timestamp >= (view_window_start - margin)
-                                    && candle.timestamp <= (window_end + margin)
-                            })
-                            .cloned()
-                            .collect();
 
                         match chart_type {
                             ChartType::Line => {
@@ -1047,7 +1081,9 @@ impl eframe::App for CryptoApp {
                             .allow_drag([true, false])
                             .allow_scroll(false)
                             .auto_bounds(egui::Vec2b::new(false, true))
-                            .default_x_bounds(view_window_start, view_window_start + window_size)
+                            .default_x_bounds(view_window_start, effective_window_end)
+                            .y_axis_width(5)  // 이 줄 추가
+
                             .show_background(false)
                             .show_axes([false, true])
                             .y_axis_position(egui_plot::HPlacement::Right);
@@ -1062,13 +1098,12 @@ impl eframe::App for CryptoApp {
                                 }
                             }
 
-                            let window_end = view_window_start + window_size;
-                            let filtered_data: Vec<_> = data
+                            let filtered_data: Vec<_> = chart_data
                                 .iter()
                                 .filter(|candle| {
                                     let margin = window_size * 0.1;
                                     candle.timestamp >= (view_window_start - margin)
-                                        && candle.timestamp <= (window_end + margin)
+                                        && candle.timestamp <= (effective_window_end + margin)
                                 })
                                 .cloned()
                                 .collect();
@@ -1116,8 +1151,10 @@ impl eframe::App for CryptoApp {
                             .allow_drag([true, false])
                             .allow_scroll(false)
                             .auto_bounds(egui::Vec2b::new(false, true))
-                            .default_x_bounds(view_window_start, view_window_start + window_size)
+                            .default_x_bounds(view_window_start, effective_window_end)
                             .show_axes([false, true])
+                            .y_axis_width(5)  // 이 줄 추가
+
                             .y_axis_position(egui_plot::HPlacement::Right);
 
                         macd_plot.show(ui, |plot_ui| {
@@ -1130,13 +1167,12 @@ impl eframe::App for CryptoApp {
                                 }
                             }
 
-                            let window_end = view_window_start + window_size;
-                            let filtered_data: Vec<_> = data
+                            let filtered_data: Vec<_> = chart_data
                                 .iter()
                                 .filter(|candle| {
                                     let margin = window_size * 0.1;
                                     candle.timestamp >= (view_window_start - margin)
-                                        && candle.timestamp <= (window_end + margin)
+                                        && candle.timestamp <= (effective_window_end + margin)
                                 })
                                 .cloned()
                                 .collect();
@@ -1211,9 +1247,11 @@ impl eframe::App for CryptoApp {
                             .allow_drag([true, false])
                             .allow_scroll(false)
                             .auto_bounds(egui::Vec2b::new(false, false))
-                            .default_x_bounds(view_window_start, view_window_start + window_size)
+                            .default_x_bounds(view_window_start, effective_window_end)
                             .default_y_bounds(0.0, 100.0)
                             .show_axes([true, true])
+                            .y_axis_width(5)  // 이 줄 추가
+
                             .y_axis_position(egui_plot::HPlacement::Right);
 
                         rsi_plot.show(ui, |plot_ui| {
@@ -1226,13 +1264,12 @@ impl eframe::App for CryptoApp {
                                 }
                             }
 
-                            let window_end = view_window_start + window_size;
-                            let filtered_data: Vec<_> = data
+                            let filtered_data: Vec<_> = chart_data
                                 .iter()
                                 .filter(|candle| {
                                     let margin = window_size * 0.1;
                                     candle.timestamp >= (view_window_start - margin)
-                                        && candle.timestamp <= (window_end + margin)
+                                        && candle.timestamp <= (effective_window_end + margin)
                                 })
                                 .cloned()
                                 .collect();
@@ -1251,17 +1288,17 @@ impl eframe::App for CryptoApp {
                                     // Add RSI reference lines
                                     let overbought: PlotPoints = vec![
                                         [view_window_start, 70.0],
-                                        [view_window_start + window_size, 70.0],
+                                        [effective_window_end, 70.0],
                                     ]
                                     .into();
                                     let oversold: PlotPoints = vec![
                                         [view_window_start, 30.0],
-                                        [view_window_start + window_size, 30.0],
+                                        [effective_window_end, 30.0],
                                     ]
                                     .into();
                                     let middle: PlotPoints = vec![
                                         [view_window_start, 50.0],
-                                        [view_window_start + window_size, 50.0],
+                                        [effective_window_end, 50.0],
                                     ]
                                     .into();
 
@@ -1286,15 +1323,16 @@ impl eframe::App for CryptoApp {
             }
 
             // 모든 차트 처리 후 공유 드래그 적용
+            // 모든 차트 처리 후 공유 드래그 적용
             if self.any_chart_dragged && self.shared_drag_delta.abs() > 0.1 {
                 let proposed_start = view_window_start - self.shared_drag_delta as f64;
-                let proposed_end = proposed_start + window_size;
+                let proposed_end = proposed_start + window_size - right_margin; // right_margin_seconds -> right_margin
 
                 if proposed_end <= latest_timestamp && proposed_start >= 0.0 {
                     self.view_window_start = proposed_start;
                     self.is_live_mode = false;
                 } else if proposed_end > latest_timestamp {
-                    self.view_window_start = latest_timestamp - window_size;
+                    self.view_window_start = latest_timestamp - window_size + right_margin; // right_margin_seconds -> right_margin
                     self.is_live_mode = true;
                 } else if proposed_start < 0.0 {
                     self.view_window_start = 0.0;
