@@ -12,7 +12,6 @@ use iced::{
     Color, Pixels, Point, Rectangle, Size,
 };
 use std::collections::{BTreeMap, VecDeque};
-//knn 차트
 
 pub fn calculate_rsi(
     candlesticks: &BTreeMap<u64, Candlestick>,
@@ -86,124 +85,6 @@ pub fn calculate_moving_average(
     }
 
     result
-}
-/*
-Momentum
-
-
-period가 클수록: 장기 추세 중시
-momentum_threshold가 클수록: 강한 변화만 포착
-volume_threshold가 클수록: 거래량이 많은 경우만 포착
-*/
-pub fn calculate_momentum_signals(
-    candlesticks: &BTreeMap<u64, Candlestick>,
-    is_realtime: bool,
-    candle_type: &CandleType, // 캔들 타입 추가
-) -> (BTreeMap<u64, f32>, BTreeMap<u64, f32>) {
-    let mut buy_signals = BTreeMap::new();
-    let mut sell_signals = BTreeMap::new();
-
-    let (period, momentum_threshold, volume_threshold) = match candle_type {
-        CandleType::Minute1 => (
-            uc::MOMENTUM_1MINUTE_PERIOD,
-            uc::MOMENTUM_1MINUTE_THRESHOLD,
-            uc::MOMENTUM_1MINUTE_VOLUME_THRESHOLD,
-        ), // 훨씬 낮은 임계값
-        CandleType::Minute3 => (
-            uc::MOMENTUM_3MINUTE_PERIOD,
-            uc::MOMENTUM_3MINUTE_THRESHOLD,
-            uc::MOMENTUM_3MINUTE_VOLUME_THRESHOLD,
-        ), // 훨씬 낮은 임계값
-        CandleType::Day => (
-            uc::MOMENTUM_DAY_PERIOD,
-            uc::MOMENTUM_DAY_THRESHOLD,
-            uc::MOMENTUM_DAY_VOLUME_THRESHOLD,
-        ),
-    };
-
-    println!(
-        "Settings - Period: {}, Momentum Threshold: {}, Volume Threshold: {}",
-        period, momentum_threshold, volume_threshold
-    );
-
-    // 데이터 상태 확인
-    let data: Vec<(&u64, &Candlestick)> = candlesticks.iter().collect();
-    println!("Total data points: {}", data.len());
-
-    if data.len() < period {
-        println!("Not enough data points");
-        return (BTreeMap::new(), BTreeMap::new());
-    }
-
-    for i in period..data.len() {
-        let (timestamp, current_candle) = data[i];
-        let (_, past_candle) = data[i - period];
-
-        // 모멘텀 값 계산 (현재가격 - N일 전 가격) / N일 전 가격 * 100
-        let momentum = (current_candle.close - past_candle.close) / past_candle.close * 100.0;
-
-        // 추가 필터: 거래량 확인
-        let volume_ratio = current_candle.volume
-            / data[i - period..i]
-                .iter()
-                .map(|(_, c)| c.volume)
-                .sum::<f32>()
-            * period as f32;
-
-        // 매수 신호
-        if momentum > momentum_threshold && volume_ratio > volume_threshold {
-            let mut strength = 0.5;
-
-            // 모멘텀이 강할수록 신호 강도 증가
-            strength += (momentum / 10.0).min(0.3);
-
-            // 거래량이 많을수록 신호 강도 증가
-            if volume_ratio > 1.2 {
-                strength += ((volume_ratio - 1.2) / 2.0).min(0.2);
-            }
-
-            let final_strength = strength.min(1.0);
-
-            if final_strength > 0.7 && is_realtime && i == data.len() - 1 {
-                println!("=== 강한 상승 모멘텀 감지! ===");
-                println!("가격: {:.2}", current_candle.close);
-                println!("모멘텀: {:.2}%", momentum);
-                println!("거래량 비율: {:.2}", volume_ratio);
-                println!("신호 강도: {:.2}", final_strength);
-                println!("========================");
-            }
-
-            buy_signals.insert(*timestamp, final_strength);
-        }
-
-        // 매도 신호
-        if momentum < -momentum_threshold && volume_ratio > volume_threshold {
-            let mut strength = 0.5;
-
-            // 하락 모멘텀이 강할수록 신호 강도 증가
-            strength += (-momentum / 10.0).min(0.3);
-
-            // 거래량이 많을수록 신호 강도 증가
-            if volume_ratio > 1.2 {
-                strength += ((volume_ratio - 1.2) / 2.0).min(0.2);
-            }
-
-            let final_strength = strength.min(1.0);
-
-            if final_strength > 0.7 && is_realtime && i == data.len() - 1 {
-                println!("=== 강한 하락 모멘텀 감지! ===");
-                println!("가격: {:.2}", current_candle.close);
-                println!("모멘텀: {:.2}%", momentum);
-                println!("거래량 비율: {:.2}", volume_ratio);
-                println!("신호 강도: {:.2}", final_strength);
-                println!("========================");
-            }
-
-            sell_signals.insert(*timestamp, final_strength);
-        }
-    }
-
-    (buy_signals, sell_signals)
 }
 
 impl Chart {

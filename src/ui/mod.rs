@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, VecDeque};
 pub mod chart;
 use iced::Point;
 pub mod buttons;
-pub mod infos;
 pub mod trading;
 use crate::SignalScoring;
+pub mod infos;
 //chart 구조체
 // ui/mod.rs
 pub struct Chart {
@@ -13,7 +13,7 @@ pub struct Chart {
     pub state: ChartState,
     pub price_range: Option<(f32, f32)>,
     pub candle_type: CandleType,
-    
+
     // 이동평균선 (기존 유지)
     pub show_ma5: bool,
     pub show_ma10: bool,
@@ -23,11 +23,11 @@ pub struct Chart {
     pub ma10_values: BTreeMap<u64, f32>,
     pub ma20_values: BTreeMap<u64, f32>,
     pub ma200_values: BTreeMap<u64, f32>,
-    
+
     // RSI (기존 유지)
     pub rsi_values: BTreeMap<u64, f32>,
     pub show_rsi: bool,
-    
+
     // 점수 기반 신호만 새로 추가
     pub scored_signals_enabled: bool,
     pub buy_scored_signals: BTreeMap<u64, SignalScoring>,

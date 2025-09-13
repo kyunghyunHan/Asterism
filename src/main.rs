@@ -1,5 +1,4 @@
 use dotenv::dotenv;
-use models::OptimizedKNNPredictor;
 mod api;
 mod models;
 mod trading;
