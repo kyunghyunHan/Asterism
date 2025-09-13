@@ -5,6 +5,7 @@ mod models;
 mod trading;
 mod ui;
 mod utils;
+use crate::models::SignalScoring;
 use api::{
     account::binance_account_connection,
     binance::{binance_connection, fetch_candles, fetch_candles_async, get_top_volume_pairs},
@@ -25,9 +26,9 @@ use trading::{
     markey_order::{market_buy, market_sell},
     TradeType,
 };
+use ui::chart::calculate_scored_signals;
 use ui::{
     buttons::ma_controls,
-    chart::{calculate_knn_signals, calculate_momentum_signals},
     infos::{account_info, coin_info, current_position},
     trading::{auto_trading_toggle, order_buttons},
     CandleType, Candlestick, Chart, ChartState,
@@ -48,19 +49,16 @@ pub struct Futurx {
     show_ma200: bool,                         // 200일 이동평균선 표시 여부
     loading_more: bool,                       // 추가 데이터 로딩 중 여부
     oldest_date: Option<String>,              // 가장 오래된 캔들 날짜
-    knn_enabled: bool,                        // KNN 예측 활성화 여부
-    knn_prediction: Option<String>,           // KNN 예측 결과 ("UP" 또는 "DOWN")
-    knn_buy_signals: BTreeMap<u64, f32>,      // KNN 매수 신호
-    knn_sell_signals: BTreeMap<u64, f32>,     // KNN 매도 신호
     account_info: Option<FuturesAccountInfo>, // 계좌 정보
     alerts: VecDeque<Alert>,                  // 알림 메시지 큐
     auto_trading_enabled: bool,               // 자동매매 활성화 상태
     last_trade_time: Option<Instant>,         // 마지막 거래 시간
     alert_sender: mpsc::Sender<(String, AlertType)>, // 알림 메시지 전송자
     average_prices: HashMap<String, f64>,     // 평균 가격 정보
-    momentum_enabled: bool,                   // 모멘텀 전략 활성화 여부
-    momentum_buy_signals: BTreeMap<u64, f32>, // 모멘텀 매수 신호
-    momentum_sell_signals: BTreeMap<u64, f32>, // 모멘텀 매도 신호
+
+    scored_signals_enabled: bool,
+    buy_scored_signals: BTreeMap<u64, SignalScoring>,
+    sell_scored_signals: BTreeMap<u64, SignalScoring>,
 }
 enum Pane {
     Chart,
@@ -111,8 +109,6 @@ pub enum Message {
     ToggleMA200,                                   // 200일 이동평균선 토글
     LoadMoreCandles,                               // 추가 캔들 로드
     MoreCandlesLoaded(BTreeMap<u64, Candlestick>), // 추가 캔들 로드 완료
-    ToggleKNN,                                     // KNN 시스템 토글
-    ToggleMomentum,                                // 모멘텀 시스템 토글
     TryBuy {
         // 매수 시도
         price: f64,
@@ -136,6 +132,7 @@ pub enum Message {
     MarketBuy,                             // 시장가 매수
     MarketSell,                            // 시장가 매도
     UpdateAveragePrice(String, f64),       // 평균가격 업데이트
+    ToggleScoredSignals,
 }
 //코인 정보 구조체
 #[derive(Debug, Clone)]
@@ -224,19 +221,17 @@ impl Default for Futurx {
             show_ma200: false,
             loading_more: false,
             oldest_date: None,
-            knn_enabled: false,
-            knn_prediction: None,
-            knn_buy_signals: BTreeMap::new(),
-            knn_sell_signals: BTreeMap::new(),
+
             account_info: None,
             alerts: VecDeque::with_capacity(5),
             auto_trading_enabled: false,
             last_trade_time: None,
             alert_sender,
             average_prices: HashMap::new(),
-            momentum_enabled: false,
-            momentum_buy_signals: BTreeMap::new(),
-            momentum_sell_signals: BTreeMap::new(),
+
+            scored_signals_enabled: true, // 기본으로 활성화
+            buy_scored_signals: BTreeMap::new(),
+            sell_scored_signals: BTreeMap::new(),
         }
     }
 }
@@ -313,13 +308,9 @@ impl Futurx {
                         self.show_ma10,
                         self.show_ma20,
                         self.show_ma200,
-                        self.knn_enabled,
-                        self.knn_prediction.clone(),
-                        self.knn_buy_signals.clone(),
-                        self.knn_sell_signals.clone(),
-                        self.momentum_enabled,
-                        self.momentum_buy_signals.clone(),
-                        self.momentum_sell_signals.clone(),
+                        self.scored_signals_enabled,
+                        self.buy_scored_signals.clone(),
+                        self.sell_scored_signals.clone(),
                     ))
                     .width(iced::Fill)
                     .height(iced::Fill);
@@ -555,38 +546,6 @@ impl Futurx {
                 }
             }
 
-            Message::ToggleKNN => {
-                self.knn_enabled = !self.knn_enabled;
-                if self.knn_enabled {
-                    if let Some(prediction) = self.predict_knn() {
-                        self.knn_prediction = Some(prediction);
-                        let (buy_signals, sell_signals) =
-                            calculate_knn_signals(&self.candlesticks, false);
-                        self.knn_buy_signals = buy_signals;
-                        self.knn_sell_signals = sell_signals;
-                    }
-                } else {
-                    self.knn_prediction = None;
-                    self.knn_buy_signals.clear();
-                    self.knn_sell_signals.clear();
-                }
-            }
-            Message::ToggleMomentum => {
-                self.momentum_enabled = !self.momentum_enabled;
-                if self.momentum_enabled {
-                    let (buy_signals, sell_signals) = calculate_momentum_signals(
-                        &self.candlesticks,
-                        false,
-                        &self.selected_candle_type,
-                    );
-                    self.momentum_buy_signals = buy_signals;
-                    self.momentum_sell_signals = sell_signals;
-                } else {
-                    self.momentum_buy_signals.clear();
-                    self.momentum_sell_signals.clear();
-                }
-            }
-
             Message::LoadMoreCandles => {
                 if !self.loading_more {
                     // 가장 오래된 캔들의 날짜를 찾아서 to 파라미터로 사용
@@ -616,23 +575,6 @@ impl Futurx {
             Message::MoreCandlesLoaded(mut new_candles) => {
                 if !new_candles.is_empty() {
                     self.candlesticks.append(&mut new_candles);
-
-                    // 새로운 데이터가 로드되면 KNN 신호도 다시 계산
-                    if self.knn_enabled {
-                        let (buy_signals, sell_signals) =
-                            calculate_knn_signals(&self.candlesticks, false); // false 추가
-                        self.knn_buy_signals = buy_signals;
-                        self.knn_sell_signals = sell_signals;
-                    }
-                    if self.momentum_enabled {
-                        let (buy_signals, sell_signals) = calculate_momentum_signals(
-                            &self.candlesticks,
-                            false,
-                            &self.selected_candle_type,
-                        ); // false 추가
-                        self.momentum_buy_signals = buy_signals;
-                        self.momentum_sell_signals = sell_signals;
-                    }
                 }
             }
 
@@ -661,27 +603,7 @@ impl Futurx {
                             candle_type
                         );
                         self.candlesticks = candles;
-                        // KNN 활성화 상태면 과거 데이터에 대해서도 신호 계산
-                        if self.knn_enabled {
-                            let (buy_signals, sell_signals) =
-                                calculate_knn_signals(&self.candlesticks, false);
-                            self.knn_buy_signals = buy_signals;
-                            self.knn_sell_signals = sell_signals;
 
-                            // 예측도 업데이트
-                            if let Some(prediction) = self.predict_knn() {
-                                self.knn_prediction = Some(prediction);
-                            }
-                        }
-                        if self.momentum_enabled {
-                            let (buy_signals, sell_signals) = calculate_momentum_signals(
-                                &self.candlesticks,
-                                false,
-                                &self.selected_candle_type,
-                            );
-                            self.momentum_buy_signals = buy_signals;
-                            self.momentum_sell_signals = sell_signals;
-                        }
                         // 가장 오래된 캔들의 날짜 저장
                         if let Some((&timestamp, _)) = self.candlesticks.iter().next() {
                             let datetime = chrono::NaiveDateTime::from_timestamp_opt(
@@ -708,11 +630,23 @@ impl Futurx {
                 }
             }
             Message::WebSocketInit(sender) => {
+                println!("WebSocket sender initialized!");
                 self.ws_sender = Some(sender);
             }
             Message::SelectCoin(symbol) => {
                 println!("Switching to coin: {}", symbol);
                 self.selected_coin = symbol.clone();
+
+                if let Some(sender) = &self.ws_sender {
+                    println!("Sending WebSocket subscription for: {}", symbol);
+                    if let Err(e) = sender.clone().try_send(symbol.clone()) {
+                        println!("ERROR sending WebSocket subscription: {:?}", e);
+                    } else {
+                        println!("WebSocket subscription sent successfully");
+                    }
+                } else {
+                    println!("ERROR: WebSocket sender is None!");
+                }
                 self.candlesticks.clear();
 
                 match fetch_candles(
@@ -730,28 +664,7 @@ impl Futurx {
                                 symbol
                             );
                             self.candlesticks = candles;
-                            // KNN 활성화 상태면 과거 데이터에 대해서도 신호 계산
-                            if self.knn_enabled {
-                                let (buy_signals, sell_signals) =
-                                    calculate_knn_signals(&self.candlesticks, false);
-                                self.knn_buy_signals = buy_signals;
-                                self.knn_sell_signals = sell_signals;
 
-                                // 예측도 업데이트
-                                if let Some(prediction) = self.predict_knn() {
-                                    self.knn_prediction = Some(prediction);
-                                }
-                            }
-
-                            if self.momentum_enabled {
-                                let (buy_signals, sell_signals) = calculate_momentum_signals(
-                                    &self.candlesticks,
-                                    false,
-                                    &self.selected_candle_type,
-                                );
-                                self.momentum_buy_signals = buy_signals;
-                                self.momentum_sell_signals = sell_signals;
-                            }
                             // 가장 오래된 캔들의 날짜 저장
                             if let Some((&timestamp, _)) = self.candlesticks.iter().next() {
                                 let datetime = chrono::NaiveDateTime::from_timestamp_opt(
@@ -788,23 +701,37 @@ impl Futurx {
                 if trade_data.symbol != current_market {
                     return;
                 }
-                //knn
-                if self.knn_enabled {
-                    let (buy_signals, sell_signals) =
-                        calculate_knn_signals(&self.candlesticks, true); // true로 실시간 표시
-                    self.knn_buy_signals = buy_signals;
-                    self.knn_sell_signals = sell_signals;
-                }
 
-                if self.momentum_enabled {
-                    let (buy_signals, sell_signals) = calculate_momentum_signals(
+                if self.scored_signals_enabled {
+                    println!("📊 Scored signals enabled! Calculating...");
+                    println!("📊 Candlesticks count: {}", self.candlesticks.len());
+
+                    let (buy_scores, sell_scores) = calculate_scored_signals(
                         &self.candlesticks,
                         true,
-                        &self.selected_candle_type, // 이 부분이 이전에 빠져있었음
+                        &self.selected_candle_type,
                     );
-                    self.momentum_buy_signals = buy_signals;
-                    self.momentum_sell_signals = sell_signals;
+
+                    println!(
+                        "📊 Calculated buy_scores: {}, sell_scores: {}",
+                        buy_scores.len(),
+                        sell_scores.len()
+                    );
+
+                    // 계산된 점수들 출력
+                    for (timestamp, score) in &buy_scores {
+                        println!("📊 Buy score at {}: {:.1}", timestamp, score.total_score);
+                    }
+                    for (timestamp, score) in &sell_scores {
+                        println!("📊 Sell score at {}: {:.1}", timestamp, score.total_score);
+                    }
+
+                    self.buy_scored_signals = buy_scores;
+                    self.sell_scored_signals = sell_scores;
+                } else {
+                    println!("📊 Scored signals DISABLED");
                 }
+
                 if self.candlesticks.is_empty() {
                     // 초기 데이터 로드
                     if let Ok(candles) = fetch_candles(
@@ -815,7 +742,43 @@ impl Futurx {
                         self.candlesticks = candles;
                     }
                 }
+                if self.scored_signals_enabled {
+                    let (buy_scores, sell_scores) = calculate_scored_signals(
+                        &self.candlesticks,
+                        true,
+                        &self.selected_candle_type,
+                    );
 
+                    self.buy_scored_signals = buy_scores;
+                    self.sell_scored_signals = sell_scores;
+
+                    // 최신 신호 확인
+                    if let Some(&last_timestamp) = self.candlesticks.keys().last() {
+                        if let Some(buy_score) = self.buy_scored_signals.get(&last_timestamp) {
+                            if buy_score.total_score >= 85.0 {
+                                self.add_alert(
+                                    format!(
+                                        "초강력 매수 신호! 점수: {:.0}/100",
+                                        buy_score.total_score
+                                    ),
+                                    AlertType::Buy,
+                                );
+                            }
+                        }
+
+                        if let Some(sell_score) = self.sell_scored_signals.get(&last_timestamp) {
+                            if sell_score.total_score >= 85.0 {
+                                self.add_alert(
+                                    format!(
+                                        "초강력 매도 신호! 점수: {:.0}/100",
+                                        sell_score.total_score
+                                    ),
+                                    AlertType::Sell,
+                                );
+                            }
+                        }
+                    }
+                }
                 let current_timestamp = timestamp;
                 let candle_timestamp = match self.selected_candle_type {
                     CandleType::Minute1 => current_timestamp - (current_timestamp % 60000),
@@ -853,23 +816,13 @@ impl Futurx {
             Message::Error => {
                 println!("WebSocket connection error");
             }
-        }
-    }
-
-    // KNN 예측 헬퍼 메서드
-    fn predict_knn(&self) -> Option<String> {
-        let predictor = OptimizedKNNPredictor::new(5, 20, 1000);
-        let data: Vec<(&u64, &Candlestick)> = self.candlesticks.iter().collect();
-        if data.len() < predictor.window_size {
-            return None;
-        }
-
-        if let Some(features) =
-            predictor.extract_features(&data[data.len() - predictor.window_size..])
-        {
-            predictor.predict(&features)
-        } else {
-            None
+            Message::ToggleScoredSignals => {
+                self.scored_signals_enabled = !self.scored_signals_enabled;
+                if !self.scored_signals_enabled {
+                    self.buy_scored_signals.clear();
+                    self.sell_scored_signals.clear();
+                }
+            }
         }
     }
 
@@ -896,151 +849,11 @@ impl std::fmt::Display for CandleType {
         }
     }
 }
-
-// use dotenv::dotenv;
-
-// // mod ui;
-// mod utils;
-
-// use iced::widget::canvas::path::lyon_path;
-// use iced::{
-//     futures::channel::mpsc,
-//     mouse,
-//     time::{Duration, Instant},
-//     widget::{
-//         canvas::{self, Canvas, Frame, Path, Stroke},
-//         container, pane_grid, pick_list, text, Column, Container, Row, Text,
-//     },
-//     Element, Length,
-//     Length::FillPortion,
-//     Point, Rectangle, Size, Subscription,
-// };
-// use serde::{Deserialize, Serialize};
-// use std::collections::{BTreeMap, HashMap, VecDeque};
-// use utils::{constant as uc, logs as ul};
-// #[derive(Debug, Clone)]
-// pub enum Message {
-//     PaneDragged(pane_grid::DragEvent),   // 매개변수 필요
-//     PaneResized(pane_grid::ResizeEvent), // 매개변수 필요
-// }
-// pub struct Futurx {
-//     panes: pane_grid::State<Pane>,
-// }
-// struct Chart;
-// #[derive(Default, Debug)]
-// pub struct ChartState {} // Candlestick 구조체 업데이트
-// impl canvas::Program<Message> for Chart {
-//     type State = ChartState;
-//     fn draw(
-//         &self,
-//         // device: &mut wgpu::Device,
-//         state: &Self::State,
-//         renderer: &iced::Renderer,
-//         _theme: &iced::Theme,
-//         bounds: Rectangle,
-//         _cursor: mouse::Cursor,
-//     ) -> Vec<canvas::Geometry> {
-//         let mut frame = canvas::Frame::new(renderer, bounds.size());
-
-//         println!("{:?}", bounds.size());
-//         let path = Path::new(|p| {
-//             p.move_to(Point::new(50., bounds.height - 50.));
-//             // p.line_to(Point::new(200.0, 100.0));
-//             for i in 1..100 {
-//                 p.line_to(Point::new(
-//                     100. + i as f32,
-//                     bounds.height - (100.0 + i as f32),
-//                 ));
-//             }
-//             // p.line_to(Point::new(300.0, 100.0));
-//         });
-//         // 경로 생성
-
-//         // 경로 렌더링
-//         frame.stroke(
-//             &path,
-//             Stroke::default()
-//                 .with_width(2.0)
-//                 .with_color([0.0, 0.5, 0.8, 1.0].into()),
-//         );
-
-//         vec![frame.into_geometry()]
-//     }
-// }
-// enum Pane {
-//     Chart,
-//     LeftSidebar,
-//     RightSidebar,
-// }
-// impl Default for Futurx {
-//     fn default() -> Self {
-//         let (mut panes, first_pane) = pane_grid::State::new(Pane::Chart);
-
-//         Self { panes: panes }
-//     }
-// }
-// impl Futurx {
-//     pub fn update(&mut self, message: Message) {
-//         match message {
-//             Message::PaneDragged(drag_event) => match drag_event {
-//                 pane_grid::DragEvent::Dropped { pane, target } => {
-//                     if let iced::widget::pane_grid::Target::Pane(dest_pane, _region) = &target {
-//                         self.panes.swap(pane, *dest_pane);
-//                     } else {
-//                         println!("Not")
-//                     }
-//                 }
-
-//                 _ => {}
-//             },
-//             Message::PaneResized(resize_event) => {
-//                 // 리사이즈 이벤트 처리
-//                 let pane_grid::ResizeEvent { split, ratio } = resize_event;
-//                 println!("분할선 {:?}의 비율이 {:.2}로 변경됨", split, ratio);
-
-//                 // 분할선 위치 업데이트 로직
-//                 // 예시 코드 (실제 API에 맞게 수정 필요)
-//                 // self.panes.update_ratio(split, ratio);
-//             } // 다른 메시지 처리
-//         }
-//     }
-//     pub fn view(&self) -> Element<Message> {
-//         // 패널 그리드 구성
-//         pane_grid::PaneGrid::new(&self.panes, |_pane, content_type, _is_maximized| {
-//             match content_type {
-//                 Pane::Chart => {
-//                     // Canvas를 Column으로 감싸서 Element<Message>로 변환
-//                     Container::new(
-//                         Column::new()
-//                             .push(Canvas::new(Chart).width(Length::Fill).height(Length::Fill)),
-//                     )
-//                     .into()
-//                 }
-//                 Pane::LeftSidebar => {
-//                     Container::new(Column::new().push(Text::new("Left Sidebar"))).into()
-//                 }
-//                 Pane::RightSidebar => {
-//                     Container::new(Column::new().push(Text::new("Right Sidebar"))).into()
-//                 }
-//                 _ => {
-//                     let title = "utils";
-//                     let header = pane_grid::TitleBar::new(Text::new(title)).padding(10);
-//                     let content = Text::new("추가 패널 내용");
-
-//                     pane_grid::Content::new(content).title_bar(header)
-//                 }
-//             }
-//         })
-//         .on_drag(Message::PaneDragged)
-//         .on_resize(10, Message::PaneResized)
-//         .into()
-//     }
-// }
 fn main() -> iced::Result {
     //환경변수 설정
     dotenv().ok();
     iced::application("Futurx", Futurx::update, Futurx::view)
-        // .subscription(Futurx::subscription)
+        .subscription(Futurx::subscription)
         .window_size(Size::new(1900., 1020.))
         .run()
 }

@@ -12,120 +12,8 @@ use iced::{
     Color, Pixels, Point, Rectangle, Size,
 };
 use std::collections::{BTreeMap, VecDeque};
-//knn 차트 
-pub fn calculate_knn_signals(
-    candlesticks: &BTreeMap<u64, Candlestick>,
-    is_realtime: bool, // 실시간 여부 파라미터 추가
-) -> (BTreeMap<u64, f32>, BTreeMap<u64, f32>) {
-    let mut buy_signals = BTreeMap::new();
-    let mut sell_signals = BTreeMap::new();
+//knn 차트
 
-    let window_size = 20;
-    let data: Vec<(&u64, &Candlestick)> = candlesticks.iter().collect();
-
-    if data.len() < window_size {
-        return (buy_signals, sell_signals);
-    }
-
-    for i in window_size..data.len() {
-        let (timestamp, candle) = data[i];
-        let window = &data[i - window_size..i];
-
-        // 이동평균선 계산
-        let ma5: f32 = window
-            .iter()
-            .rev()
-            .take(5)
-            .map(|(_, c)| c.close)
-            .sum::<f32>()
-            / 5.0;
-        let ma20: f32 = window.iter().map(|(_, c)| c.close).sum::<f32>() / window_size as f32;
-
-        // RSI 계산
-        let price_changes: Vec<f32> = window
-            .windows(2)
-            .map(|w| {
-                let (_, prev) = w[0];
-                let (_, curr) = w[1];
-                curr.close - prev.close
-            })
-            .collect();
-
-        let (gains, losses): (Vec<f32>, Vec<f32>) = price_changes
-            .iter()
-            .map(|&change| {
-                if change > 0.0 {
-                    (change, 0.0)
-                } else {
-                    (0.0, -change)
-                }
-            })
-            .unzip();
-
-        let avg_gain = gains.iter().sum::<f32>() / gains.len() as f32;
-        let avg_loss = losses.iter().sum::<f32>() / losses.len() as f32;
-        let rs = if avg_loss == 0.0 {
-            100.0
-        } else {
-            avg_gain / avg_loss
-        };
-        let rsi = 100.0 - (100.0 / (1.0 + rs));
-
-        // 볼륨 분석
-        let avg_volume = window.iter().map(|(_, c)| c.volume).sum::<f32>() / window_size as f32;
-        let volume_ratio = candle.volume / avg_volume;
-
-        // 매수 신호 강도 계산
-        if (rsi < 35.0 && ma5 > ma20) || (ma5 > ma20 && volume_ratio > 1.5) {
-            let mut strength = 0.5;
-
-            if rsi < 35.0 {
-                strength += (35.0 - rsi) / 35.0 * 0.25;
-            }
-            if ma5 > ma20 {
-                let ma_diff = (ma5 - ma20) / ma20;
-                strength += ma_diff.min(0.25);
-            }
-            if volume_ratio > 1.5 {
-                strength += ((volume_ratio - 1.5) / 2.0).min(0.25);
-            }
-
-            let final_strength = strength.min(1.0);
-
-            if final_strength > 0.8 && is_realtime && i == data.len() - 1 {
-                println!("매수");
-            }
-
-            buy_signals.insert(*timestamp, final_strength);
-        }
-
-        // 매도 신호 강도 계산
-        if (rsi > 65.0 && ma5 < ma20) || (ma5 < ma20 && volume_ratio > 1.5) {
-            let mut strength = 0.5;
-
-            if rsi > 65.0 {
-                strength += (rsi - 65.0) / 35.0 * 0.25;
-            }
-            if ma5 < ma20 {
-                let ma_diff = (ma20 - ma5) / ma5;
-                strength += ma_diff.min(0.25);
-            }
-            if volume_ratio > 1.5 {
-                strength += ((volume_ratio - 1.5) / 2.0).min(0.25);
-            }
-
-            let final_strength = strength.min(1.0);
-
-            if final_strength > 0.8 && is_realtime && i == data.len() - 1 {
-                println!("매도");
-            }
-
-            sell_signals.insert(*timestamp, final_strength);
-        }
-    }
-
-    (buy_signals, sell_signals)
-}
 pub fn calculate_rsi(
     candlesticks: &BTreeMap<u64, Candlestick>,
     period: usize,
@@ -326,13 +214,9 @@ impl Chart {
         show_ma10: bool,
         show_ma20: bool,
         show_ma200: bool,
-        knn_enabled: bool,
-        knn_prediction: Option<String>,
-        buy_signals: BTreeMap<u64, f32>,  // 타입 변경
-        sell_signals: BTreeMap<u64, f32>, // 타입 변경
-        momentum_enabled: bool,
-        momentum_buy_signals: BTreeMap<u64, f32>, // 타입 변경
-        momentum_sell_signals: BTreeMap<u64, f32>, // 타입 변경
+        scored_signals_enabled: bool,
+        buy_scored_signals: BTreeMap<u64, SignalScoring>,
+        sell_scored_signals: BTreeMap<u64, SignalScoring>,
     ) -> Self {
         let ma5_values = calculate_moving_average(&candlesticks, 5);
         let ma10_values = calculate_moving_average(&candlesticks, 10);
@@ -393,13 +277,9 @@ impl Chart {
             ma200_values,
             rsi_values,
             show_rsi: true,
-            knn_enabled,
-            knn_prediction,
-            buy_signals,
-            sell_signals,
-            momentum_enabled,
-            momentum_buy_signals,
-            momentum_sell_signals,
+            scored_signals_enabled,
+            buy_scored_signals,
+            sell_scored_signals,
         }
     }
 }
@@ -844,88 +724,164 @@ impl<Message> Program<Message> for Chart {
                     ..canvas::Text::default()
                 });
             }
+            // println!("Buy scored signals count: {}", self.buy_scored_signals.len());
+            // println!("Sell scored signals count: {}", self.sell_scored_signals.len());
 
-            // KNN 신호 그리기
-            if self.knn_enabled {
-                // 매수 신호
-                if let Some(&strength) = self.buy_signals.get(ts) {
-                    let signal_y = top_margin + ((max_price - candlestick.low) * y_scale) + 35.0;
+            if let Some(buy_score) = self.buy_scored_signals.get(ts) {
+                let signal_y = top_margin + ((max_price - candlestick.low) * y_scale) + 45.0;
+                let center_x = x + body_width / 2.0;
 
-                    let color = Color::from_rgba(
-                        0.0,                  // R
-                        0.8 * strength,       // G
-                        1.0 * strength,       // B
-                        0.3 + strength * 0.7, // 알파값
-                    );
+                // 점수에 따른 색상 강도
+                let alpha = (buy_score.total_score / 100.0) * 0.8 + 0.2;
+                let color = Color::from_rgba(0., 255., 100., (alpha * 255.0) as f32);
 
-                    let base_size = 6.0;
-                    let house_x = x + body_width / 2.0;
+                // 큰 상승 화살표
+                let arrow_size = 8.0 + (buy_score.total_score - 70.0) / 30.0 * 4.0;
 
-                    frame.fill(
-                        &canvas::Path::new(|p| {
-                            p.move_to(Point::new(house_x - base_size, signal_y));
-                            p.line_to(Point::new(house_x, signal_y - base_size * 2.0));
-                            p.line_to(Point::new(house_x + base_size, signal_y));
-                        }),
-                        color,
-                    );
-                }
+                frame.fill(
+                    &canvas::Path::new(|p| {
+                        p.move_to(Point::new(center_x - arrow_size, signal_y));
+                        p.line_to(Point::new(center_x, signal_y - arrow_size * 1.5));
+                        p.line_to(Point::new(center_x + arrow_size, signal_y));
+                        p.line_to(Point::new(center_x + arrow_size * 0.5, signal_y));
+                        p.line_to(Point::new(
+                            center_x + arrow_size * 0.5,
+                            signal_y + arrow_size,
+                        ));
+                        p.line_to(Point::new(
+                            center_x - arrow_size * 0.5,
+                            signal_y + arrow_size,
+                        ));
+                        p.line_to(Point::new(center_x - arrow_size * 0.5, signal_y));
+                        p.close();
+                    }),
+                    color,
+                );
 
-                // 매도 신호
-                if let Some(&strength) = self.sell_signals.get(ts) {
-                    let signal_y = top_margin + ((max_price - candlestick.high) * y_scale) - 35.0;
-
-                    let color = Color::from_rgba(
-                        1.0 * strength,       // R
-                        0.0,                  // G
-                        0.5 * strength,       // B
-                        0.3 + strength * 0.7, // 알파값
-                    );
-
-                    let base_size = 6.0;
-                    let house_x = x + body_width / 2.0;
-
-                    frame.fill(
-                        &canvas::Path::new(|p| {
-                            p.move_to(Point::new(house_x - base_size, signal_y));
-                            p.line_to(Point::new(house_x, signal_y + base_size * 2.0));
-                            p.line_to(Point::new(house_x + base_size, signal_y));
-                        }),
-                        color,
-                    );
-                }
+                // 점수 텍스트 표시
+                frame.fill_text(canvas::Text {
+                    content: format!("{:.0}", buy_score.total_score),
+                    position: Point::new(center_x - 10.0, signal_y + arrow_size + 15.0),
+                    color: Color::WHITE,
+                    size: Pixels(10.0),
+                    ..canvas::Text::default()
+                });
             }
-            if self.momentum_enabled {
-                // 매수 신호
-                if let Some(&strength) = self.momentum_buy_signals.get(ts) {
-                    let signal_y = top_margin + ((max_price - candlestick.low) * y_scale) + 25.0;
-                    let center_x = x + body_width / 2.0;
 
-                    frame.fill_text(canvas::Text {
-                        content: "BUY".to_string(),
-                        position: Point::new(center_x - 10.0, signal_y),
-                        color: Color::from_rgba(0.0, 1.0, 0.5, 0.3 + strength * 0.7),
-                        size: Pixels(12.0),
-                        ..canvas::Text::default()
-                    });
-                }
+            // 점수 기반 매도 신호
+            if let Some(sell_score) = self.sell_scored_signals.get(ts) {
+                let signal_y = top_margin + ((max_price - candlestick.high) * y_scale) - 45.0;
+                let center_x = x + body_width / 2.0;
 
-                // 매도 신호
-                if let Some(&strength) = self.momentum_sell_signals.get(ts) {
-                    let signal_y = top_margin + ((max_price - candlestick.high) * y_scale) - 25.0;
-                    let center_x = x + body_width / 2.0;
+                let alpha = (sell_score.total_score / 100.0) * 0.8 + 0.2;
+                let color = Color::from_rgba(255., 50., 50., (alpha * 255.0) as f32);
 
-                    frame.fill_text(canvas::Text {
-                        content: "SELL".to_string(),
-                        position: Point::new(center_x - 12.0, signal_y),
-                        color: Color::from_rgba(1.0, 0.0, 0.0, 0.3 + strength * 0.7),
-                        size: Pixels(12.0),
-                        ..canvas::Text::default()
-                    });
-                }
+                let arrow_size = 8.0 + (sell_score.total_score - 70.0) / 30.0 * 4.0;
+
+                // 하향 화살표
+                frame.fill(
+                    &canvas::Path::new(|p| {
+                        p.move_to(Point::new(
+                            center_x - arrow_size * 0.5,
+                            signal_y - arrow_size,
+                        ));
+                        p.line_to(Point::new(
+                            center_x + arrow_size * 0.5,
+                            signal_y - arrow_size,
+                        ));
+                        p.line_to(Point::new(center_x + arrow_size * 0.5, signal_y));
+                        p.line_to(Point::new(center_x + arrow_size, signal_y));
+                        p.line_to(Point::new(center_x, signal_y + arrow_size * 1.5));
+                        p.line_to(Point::new(center_x - arrow_size, signal_y));
+                        p.close();
+                    }),
+                    color,
+                );
+
+                frame.fill_text(canvas::Text {
+                    content: format!("{:.0}", sell_score.total_score),
+                    position: Point::new(center_x - 10.0, signal_y - arrow_size - 5.0),
+                    color: Color::WHITE,
+                    size: Pixels(10.0),
+                    ..canvas::Text::default()
+                });
             }
         }
 
         vec![frame.into_geometry()]
     }
+}
+// ui/chart.rs에 추가
+use crate::models::{CandlestickPatterns, SignalScoring};
+
+pub fn calculate_scored_signals(
+    candlesticks: &BTreeMap<u64, Candlestick>,
+    is_realtime: bool,
+    candle_type: &CandleType,
+) -> (BTreeMap<u64, SignalScoring>, BTreeMap<u64, SignalScoring>) {
+    let mut buy_scores = BTreeMap::new();
+    let mut sell_scores = BTreeMap::new();
+
+    let data: Vec<(&u64, &Candlestick)> = candlesticks.iter().collect();
+    let window_size = 20;
+
+    if data.len() < window_size {
+        return (buy_scores, sell_scores);
+    }
+
+    for i in window_size..data.len() {
+        let (timestamp, _candle) = data[i];
+        let mut scoring = SignalScoring::new();
+
+        // 3. 상승 포용선 점수 (0-25점)
+        scoring.bullish_engulfing = CandlestickPatterns::detect_bullish_engulfing(&data, i);
+
+        // 4. 샛별 점수 (0-25점)
+        scoring.morning_star = CandlestickPatterns::detect_morning_star(&data, i);
+
+        // 매수 총점 계산
+        let buy_total = scoring.bullish_engulfing + scoring.morning_star;
+        scoring.total_score = buy_total;
+
+        // 70점 이상일 때만 신호 발생
+        if buy_total >= 70.0 {
+            buy_scores.insert(*timestamp, scoring.clone());
+
+            if is_realtime && i == data.len() - 1 {
+                println!("🔥 강력한 매수 신호! 총점: {:.1}/100", buy_total);
+                println!(
+                    "  🟢 Bullish Engulfing: {:.1}/25",
+                    scoring.bullish_engulfing
+                );
+                println!("  ⭐ Morning Star: {:.1}/25", scoring.morning_star);
+                println!("========================");
+            }
+        }
+
+        // 매도 신호도 동일하게 계산
+        let mut sell_scoring = SignalScoring::new();
+
+        sell_scoring.bearish_engulfing = CandlestickPatterns::detect_bearish_engulfing(&data, i);
+        sell_scoring.evening_star = CandlestickPatterns::detect_evening_star(&data, i);
+
+        let sell_total = sell_scoring.bearish_engulfing + sell_scoring.evening_star;
+        sell_scoring.total_score = sell_total;
+
+        if sell_total >= 70.0 {
+            sell_scores.insert(*timestamp, sell_scoring.clone());
+
+            if is_realtime && i == data.len() - 1 {
+                println!("🔥 강력한 매도 신호! 총점: {:.1}/100", sell_total);
+
+                println!(
+                    "  🔴 Bearish Engulfing: {:.1}/25",
+                    sell_scoring.bearish_engulfing
+                );
+                println!("  🌟 Evening Star: {:.1}/25", sell_scoring.evening_star);
+                println!("========================");
+            }
+        }
+    }
+
+    (buy_scores, sell_scores)
 }

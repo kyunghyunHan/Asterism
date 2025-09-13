@@ -4,13 +4,17 @@ use iced::Point;
 pub mod buttons;
 pub mod infos;
 pub mod trading;
+use crate::SignalScoring;
 //chart 구조체
+// ui/mod.rs
 pub struct Chart {
-    pub candlesticks: VecDeque<(u64, Candlestick)>, // BTreeMap에서 VecDeque로 변경
-    pub max_data_points: usize,                     // 최대 데이터 포인트 수
+    pub candlesticks: VecDeque<(u64, Candlestick)>,
+    pub max_data_points: usize,
     pub state: ChartState,
     pub price_range: Option<(f32, f32)>,
     pub candle_type: CandleType,
+    
+    // 이동평균선 (기존 유지)
     pub show_ma5: bool,
     pub show_ma10: bool,
     pub show_ma20: bool,
@@ -19,15 +23,15 @@ pub struct Chart {
     pub ma10_values: BTreeMap<u64, f32>,
     pub ma20_values: BTreeMap<u64, f32>,
     pub ma200_values: BTreeMap<u64, f32>,
+    
+    // RSI (기존 유지)
     pub rsi_values: BTreeMap<u64, f32>,
     pub show_rsi: bool,
-    pub knn_enabled: bool,
-    pub knn_prediction: Option<String>,
-    pub buy_signals: BTreeMap<u64, f32>,  // bool에서 f32로 변경
-    pub sell_signals: BTreeMap<u64, f32>, // bool에서 f32로 변경
-    pub momentum_enabled: bool,
-    pub momentum_buy_signals: BTreeMap<u64, f32>, // bool에서 f32로 변경
-    pub momentum_sell_signals: BTreeMap<u64, f32>, // bool에서 f32로 변경
+    
+    // 점수 기반 신호만 새로 추가
+    pub scored_signals_enabled: bool,
+    pub buy_scored_signals: BTreeMap<u64, SignalScoring>,
+    pub sell_scored_signals: BTreeMap<u64, SignalScoring>,
 }
 
 #[derive(Default, Debug)]
